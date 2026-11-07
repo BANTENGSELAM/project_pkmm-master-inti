@@ -1,6 +1,15 @@
 const $ = id => document.getElementById(id);
 const map = L.map('map',{minZoom:4,maxZoom:17}).setView([-2.4,118],5);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',maxZoom:19}).addTo(map);
+const osm=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap contributors',maxZoom:19});
+const gibsDate=new Date().toISOString().slice(0,10);
+const nasa=L.tileLayer('https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/'+gibsDate+'/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg',{attribution:'NASA GIBS',maxZoom:9});
+const thermal=L.tileLayer('https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_Thermal_Anomalies_375m_All/default/'+gibsDate+'/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png',{attribution:'NASA FIRMS/GIBS',maxZoom:8,opacity:0.7});
+osm.addTo(map);
+const wmsBase='/api/firms/wms';
+const mk=(ly)=>(L.tileLayer&&L.tileLayer.wms)?L.tileLayer.wms(wmsBase,{layers:ly,format:'image/png',transparent:true,attribution:'NASA FIRMS'}):null;
+const viirs24=mk('fires_viirs_24');const viirs48=mk('fires_viirs_48');const viirs72=mk('fires_viirs_72');const viirs7=mk('fires_viirs_7');
+const modis24=mk('fires_modis_24');const modis48=mk('fires_modis_48');const modis72=mk('fires_modis_72');const modis7=mk('fires_modis_7');
+if(L.control&&L.control.layers){L.control.layers({'OpenStreetMap':osm,'NASA Satellite':nasa},{'Thermal Anomalies':thermal,'FIRMS VIIRS 24h':viirs24,'FIRMS VIIRS 48h':viirs48,'FIRMS VIIRS 72h':viirs72,'FIRMS VIIRS 7d':viirs7,'FIRMS MODIS 24h':modis24,'FIRMS MODIS 48h':modis48,'FIRMS MODIS 72h':modis72,'FIRMS MODIS 7d':modis7}).addTo(map);}
 const hotspots=L.layerGroup().addTo(map), selected=L.layerGroup().addTo(map);
 let boundaryLayer=null;
 let records=[];
@@ -313,3 +322,130 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadMonit
 loadMonitor();
 setInterval(()=>{if(!document.hidden)loadMonitor();},10000);
 setInterval(()=>{if(!document.hidden)loadPriorities();},60000);
+
+
+
+
+let notifData=[];
+let notifInFlight=false;
+let notifSeq=0;
+let notifMarker=null;
+let selectedNotifId=null;
+async function loadNotifications(){
+  if(notifInFlight) return;
+  notifInFlight=true;
+  const seq=++notifSeq;
+  const status=$('notifStatus');
+  try{
+    const d=await api('/api/notifications');
+    if(seq!==notifSeq) return;
+    notifData=Array.isArray(d.items)?d.items:[];
+    renderNotifications();
+    if(status)status.textContent=`${notifData.length} notifikasi`;
+    status.className='';
+  }catch(e){
+    if(seq!==notifSeq) return;
+    if(status)status.textContent=e.message;
+    status.className='status-error';
+    $('notifList').innerHTML='<div class="empty-cell">Gagal memuat notifikasi.</div>';
+  }finally{
+    notifInFlight=false;
+  }
+}
+function renderNotifications(){
+  const summary=$('notifSummary');
+  const list=$('notifList');
+  const counts={INFO:0,WASPADA:0,DARURAT:0};
+  for(const n of notifData){if(counts[n.severity]!==undefined)counts[n.severity]++;}
+  summary.innerHTML=`<span>Total: ${notifData.length}</span> <span>INFO: ${counts.INFO}</span> <span>WASPADA: ${counts.WASPADA}</span> <span>DARURAT: ${counts.DARURAT}</span>`;
+  if(!notifData.length){list.innerHTML='<div class="empty-cell">Belum ada notifikasi. Sistem akan menampilkan informasi ketika terdapat aktivitas monitoring yang memenuhi kriteria.</div>';return;}
+  list.innerHTML=notifData.map(n=>`<div class="notif-item sev-${escapeHTML(n.severity||'')} ${n.status==='read'?'read':''}" data-id="${escapeHTML(n.id)}" tabindex="0"><strong>${escapeHTML(n.severity)}</strong> ${escapeHTML(n.title||'')}</div>`).join('');
+  list.querySelectorAll('.notif-item').forEach(el=>{
+    el.addEventListener('click',()=>selectNotification(el.dataset.id));
+    el.addEventListener('keydown',e=>{if(e.key==='Enter')selectNotification(el.dataset.id);});
+  });
+}
+function selectNotification(id){
+  selectedNotifId=id;
+  const n=notifData.find(x=>x.id===id);
+  if(!n) return;
+  const detail=$('notifDetail');
+  detail.innerHTML='';
+  const add=(k,v)=>{const p=document.createElement('p');p.textContent=`${k}: ${v??'—'}`;detail.appendChild(p);};
+  add('Judul',n.title);
+  add('Severity',n.severity);
+  add('Sumber',n.source);
+  add('Pesan',n.message);
+  add('Event ID',n.event_id);
+  add('Waktu kejadian',n.occurred_at);
+  add('Dibuat',n.created_at);
+  add('Status',n.status);
+  add('Koordinat', (n.lat!=null && n.lon!=null)? `${n.lat}, ${n.lon}`:'—');
+  if(n.lat!=null && n.lon!=null && isFinite(n.lat) && isFinite(n.lon) && n.lat>=-90 && n.lat<=90 && n.lon>=-180 && n.lon<=180){
+    if(notifMarker){map.removeLayer(notifMarker);}
+    notifMarker=L.circleMarker([n.lat,n.lon],{radius:8,color:'#147c76',weight:2,fillOpacity:.6}).addTo(map);
+    map.setView([n.lat,n.lon],12);
+    const btn=document.createElement('button'); btn.textContent='Tandai dibaca'; btn.onclick=()=>markNotifRead(n.id); detail.appendChild(btn);
+  }
+}
+async function markNotifRead(id){
+  if(!id) return;
+  try{
+    await api('/api/notifications/'+encodeURIComponent(id)+'/read',{method:'POST'});
+    await loadNotifications();
+  }catch(e){
+    $('notifStatus').textContent=e.message;
+    $('notifStatus').className='status-error';
+  }
+}
+loadNotifications();
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)loadNotifications();});
+
+
+let eventData=[];
+async function loadEvents(){
+  const status=$('eventStatus');
+  try{
+    const d=await api('/api/events');
+    eventData=Array.isArray(d.items)?d.items:[];
+    renderEvents();
+    if(status)status.textContent=`${eventData.length} event`;
+    status.className='';
+  }catch(e){
+    if(status)status.textContent=e.message;
+    status.className='status-error';
+  }
+}
+function renderEvents(){
+  const list=$('eventList');
+  if(!eventData.length){list.innerHTML='<div class="empty-cell">Belum ada event.</div>';return;}
+  list.innerHTML=eventData.map(e=>`<div class="notif-item" data-eid="${escapeHTML(e.id)}" tabindex="0"><strong>${escapeHTML(e.status)}</strong> ${escapeHTML(e.severity||'')} ${escapeHTML(e.source||'')}</div>`).join('');
+  list.querySelectorAll('.notif-item').forEach(el=>{
+    el.addEventListener('click',()=>selectEvent(el.dataset.eid));
+  });
+}
+async function selectEvent(id){
+  try{
+    const d=await api('/api/events/'+encodeURIComponent(id));
+    const detail=$('eventDetail');
+    detail.innerHTML='';
+    const add=(k,v)=>{const p=document.createElement('p');p.textContent=`${k}: ${v??'—'}`;detail.appendChild(p);};
+    add('ID',d.id); add('Status',d.status); add('Severity',d.severity); add('Source',d.source);
+    add('First detected',d.first_detected_at); add('Last observed',d.last_observed_at);
+    if(d.latitude!=null && d.longitude!=null && isFinite(d.latitude) && isFinite(d.longitude)){
+      const btn=document.createElement('button'); btn.textContent='Lihat di peta'; btn.onclick=()=>{ if(notifMarker){map.removeLayer(notifMarker);} notifMarker=L.circleMarker([d.latitude,d.longitude],{radius:8,color:'#147c76'}).addTo(map); map.setView([d.latitude,d.longitude],12);}; detail.appendChild(btn);
+    }
+    // history
+    const h=await api('/api/events/'+encodeURIComponent(id)+'/history');
+    const he=$('eventHistory'); he.innerHTML='';
+    (h.items||[]).forEach(x=>{const p=document.createElement('p');p.textContent=JSON.stringify(x);he.appendChild(p);});
+    // evidence
+    const ev=await api('/api/events/'+encodeURIComponent(id)+'/evidence');
+    const ee=$('eventEvidence'); ee.innerHTML='';
+    (ev.items||[]).forEach(x=>{const p=document.createElement('p');p.textContent=JSON.stringify(x);ee.appendChild(p);});
+  }catch(e){
+    $('eventStatus').textContent=e.message;
+    $('eventStatus').className='status-error';
+  }
+}
+loadEvents();

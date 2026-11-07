@@ -3,6 +3,7 @@ import os, io, csv, time, math, threading
 from datetime import datetime, timedelta, timezone
 import joblib, pandas as pd, requests
 from flask import Flask, request, jsonify, send_from_directory
+from firms_wms import bp as firms_wms_bp
 
 ROOT = Path(__file__).resolve().parent
 for line in (ROOT / '.env').read_text(encoding='utf-8-sig').splitlines() if (ROOT / '.env').exists() else []:
@@ -10,6 +11,7 @@ for line in (ROOT / '.env').read_text(encoding='utf-8-sig').splitlines() if (ROO
         k, v = line.split('=', 1)
         os.environ.setdefault(k.strip(), v.strip().strip(chr(34)).strip(chr(39)))
 app = Flask(__name__, static_folder='static')
+app.register_blueprint(firms_wms_bp)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
 BUNDLE = joblib.load(ROOT / 'model_early_warning_sentinel2_xgb.joblib')
 MODEL = BUNDLE['model'] if isinstance(BUNDLE, dict) else BUNDLE
@@ -207,7 +209,10 @@ def prediction():
     return jsonify(analyze_location(lon, lat, start, end))
 
 from monitoring import Monitor, priorities, historical_potential
+from notifications import NotificationEngine
 MONITOR = Monitor(ROOT / 'monitor_state.json', analyze_location, indonesia)
+NOTIFICATIONS = NotificationEngine(ROOT / 'notification_state.json', MONITOR.lock)
+MONITOR.notifications = NOTIFICATIONS
 
 @app.get('/api/monitor')
 def monitor_status():
@@ -234,6 +239,61 @@ def priority_list():
     return jsonify(rows=rows, historical_potential=historical_potential(state['points']), active_count=sum(r['tier']==1 for r in rows), potential_count=sum(r['tier']==2 for r in rows),
                    firms_updated_at=firms['retrieved_at'], warning=warning,
                    note='Prioritas 1: deteksi termal dalam 24 jam, belum konfirmasi lapangan. Prioritas 2: kelas 1 XGBoost dengan citra maksimal 14 hari. Sampel grid bukan peta risiko seluruh area.')
+
+
+@app.get('/api/notifications')
+def notifications_list():
+    unread = request.args.get('unread') == '1'
+    return jsonify(items=NOTIFICATIONS.list_notifications(unread_only=unread))
+
+@app.post('/api/notifications/<nid>/read')
+def notification_read(nid):
+    return jsonify(ok=NOTIFICATIONS.mark_read(nid))
+
+@app.get('/api/events')
+def events_list():
+    st = NOTIFICATIONS.snapshot()
+    items = list(st['events'].values())
+    status = request.args.get('status')
+    severity = request.args.get('severity')
+    source = request.args.get('source')
+    if status: items = [e for e in items if e.get('status')==status]
+    if severity: items = [e for e in items if e.get('severity')==severity]
+    if source: items = [e for e in items if e.get('source')==source]
+    try:
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+    except ValueError:
+        return jsonify(error='invalid pagination'), 400
+    if limit < 1 or limit > 200 or offset < 0:
+        return jsonify(error='invalid pagination'), 400
+    total = len(items)
+    items = items[offset:offset+limit]
+    return jsonify(items=items, total=total, limit=limit, offset=offset)
+
+@app.get('/api/events/<eid>')
+def event_detail(eid):
+    st = NOTIFICATIONS.snapshot()
+    ev = st['events'].get(eid)
+    if ev is None:
+        return jsonify(error='not found'), 404
+    return jsonify(ev)
+
+@app.get('/api/events/<eid>/history')
+def event_history(eid):
+    st = NOTIFICATIONS.snapshot()
+    ev = st['events'].get(eid)
+    if ev is None:
+        return jsonify(error='not found'), 404
+    return jsonify(items=list(ev.get('history', [])))
+
+@app.get('/api/events/<eid>/evidence')
+def event_evidence(eid):
+    st = NOTIFICATIONS.snapshot()
+    ev = st['events'].get(eid)
+    if ev is None:
+        return jsonify(error='not found'), 404
+    return jsonify(items=[ev.get('evidence')] if ev.get('evidence') else [])
 
 if __name__ == '__main__':
     MONITOR.start_worker()

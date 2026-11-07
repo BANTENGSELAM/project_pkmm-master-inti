@@ -117,6 +117,13 @@ class Monitor:
                     point.update(update)
                     self.state['cursor'] = (index+1) % len(self.state['points'])
                     self.save()
+                engine = getattr(self, 'notifications', None)
+                if engine is not None and update.get('status') == 'ok' and isinstance(point.get('result'), dict) and point['result'].get('label') == '1':
+                    try:
+                        engine.process_sentinel(point['id'], point['result'])
+                    except Exception:
+                        import logging
+                        logging.exception('Notification processing failed for Sentinel')
         finally:
             with self.lock:
                 self.busy = False

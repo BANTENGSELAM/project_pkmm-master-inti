@@ -1437,3 +1437,12 @@ footer a:hover {
     margin-top: 6px;
   }
 }
+
+.notif-summary{display:flex;gap:12px;flex-wrap:wrap;margin:8px 0;}
+.notif-list{max-height:240px;overflow:auto;}
+.notif-item{padding:8px;border-bottom:1px solid #ddd;cursor:pointer;}
+
+.notif-item.sev-INFO{border-left:4px solid #1f6feb;}
+.notif-item.sev-WASPADA{border-left:4px solid #d29922;}
+.notif-item.sev-DARURAT{border-left:4px solid #f85149;}
+.notif-item.read{opacity:.6;}
